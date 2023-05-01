@@ -10,13 +10,18 @@ function OutputKafka() {
   this.mergeConfig(this.serializer_config('json_logstash'));
   this.mergeConfig({
     name: 'Kafka',
-    optional_params: ['kafkaHost', 'topic', 'partition', 'threshold_down', 'debug', 'sasl_user', 'sasl_pass' ],
+    optional_params: ['kafkaHost', 'topic', 'partition', 'acks', 'threshold_down', 'debug', 'ssl', 'sasl_mech', 'sasl_user', 'sasl_pass', 'key_field', 'timestamp_field'],
     default_values: {
       debug: false,
       threshold_down: 10,
       topic: false,
       partition: false,
-      sasl_user: false
+      acks: -1,
+      ssl: false,
+      sasl_user: false,
+      sasl_mech: 'scram-sha-256',
+      key_field: false,
+      timestamp_field: false
     },
     start_hook: this.start,
   });
@@ -30,28 +35,21 @@ OutputKafka.prototype.start = async function(callback) {
 
   var kconf = {
   	clientId: 'paStash',
-  	brokers: [this.kafkaHost]
+  	brokers: [this.kafkaHost],
+  	ssl: this.ssl,
+  	acks: this.acks
   }
 
   if (this.sasl_user && this.sasl_pass){
       kconf.sasl = {
-	    mechanism: 'scram-sha-256',
+	    mechanism: this.sasl_mech,
 	    username: this.sasl_user,
 	    password: this.sasl_pass,
       }
   }
-  this.kafka = new Kafka(kconf);
+  var kafka = new Kafka(kconf);
   this.producer = kafka.producer()
   await this.producer.connect()
-
-  this.producer.on('error', (err) => {
-    logger.warning('Kafka Client Error:', err);
-    this.error_count++;
-  });
-  this.producer.on('ready', () => {
-    console.log('Kafka Client Ready!');
-    this.error_count = 0;
-  });
 
   this.on_alarm = false;
   this.error_count = 0;
@@ -75,22 +73,16 @@ OutputKafka.prototype.check = function() {
 };
 
 OutputKafka.prototype.process = async function(data) {
-
-  var d = [{ topic: this.topic, messages: JSON.stringify(data) }];
-  try {
-    if (this.partition){
-      if (data.message) {
-	if (typeof data.message != 'object') data.message = JSON.parse(data.message);
-        d[0].key = data.message[this.partition];
-      } else {
-        d[0].key = data[this.partition];
-      }
-    }
-  } catch (e) {
-    if (this.debug) logger.info("No value found for partition key", this.partition );
+  var msgs = [{value: JSON.stringify(data)}]
+  if (this.key_field) {
+    msgs[0].key = data[this.key_field]
   }
+  if (this.timestamp_field) {
+    msgs[0].timestamp = data[this.timestamp_field]
+  }
+  var d = { topic: this.topic, messages: msgs };
 
-  if (this.debug) logger.info("Preparing to send to Kafka\n", d[0], "\n\n" );
+  if (this.debug) logger.info("Preparing to send to Kafka\n", d, "\n\n" );
   try {
     await this.producer.send(d)
   } catch (e) {
